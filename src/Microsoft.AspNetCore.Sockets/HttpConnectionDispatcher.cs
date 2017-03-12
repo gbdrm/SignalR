@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Sockets.Internal;
 using Microsoft.AspNetCore.Sockets.Transports;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
 
 namespace Microsoft.AspNetCore.Sockets
@@ -33,10 +34,11 @@ namespace Microsoft.AspNetCore.Sockets
         {
             // Get the end point mapped to this http connection
             var endpoint = (EndPoint)context.RequestServices.GetRequiredService<TEndPoint>();
+            var options = context.RequestServices.GetRequiredService<IOptions<EndPointOptions<TEndPoint>>>().Value;
 
             if (context.Request.Path.StartsWithSegments(path + "/negotiate"))
             {
-                await ProcessNegotiate(context);
+                await ProcessNegotiate(context, options);
             }
             else if (context.Request.Path.StartsWithSegments(path + "/send"))
             {
@@ -44,12 +46,14 @@ namespace Microsoft.AspNetCore.Sockets
             }
             else
             {
-                await ExecuteEndpointAsync(path, context, endpoint);
+                await ExecuteEndpointAsync(path, context, endpoint, options);
             }
         }
 
-        private async Task ExecuteEndpointAsync(string path, HttpContext context, EndPoint endpoint)
+        private async Task ExecuteEndpointAsync<TEndPoint>(string path, HttpContext context, EndPoint endpoint, EndPointOptions<TEndPoint> options) where TEndPoint : EndPoint
         {
+            var supportedTransports = options.Transports;
+
             // Server sent events transport
             if (context.Request.Path.StartsWithSegments(path + "/sse"))
             {
@@ -61,7 +65,7 @@ namespace Microsoft.AspNetCore.Sockets
                     return;
                 }
 
-                if (!await EnsureConnectionStateAsync(state, context, ServerSentEventsTransport.Name))
+                if (!await EnsureConnectionStateAsync(state, context, TransportType.ServerSentEvents, supportedTransports))
                 {
                     // Bad connection state. It's already set the response status code.
                     return;
@@ -82,7 +86,7 @@ namespace Microsoft.AspNetCore.Sockets
                     return;
                 }
 
-                if (!await EnsureConnectionStateAsync(state, context, WebSocketsTransport.Name))
+                if (!await EnsureConnectionStateAsync(state, context, TransportType.WebSockets, supportedTransports))
                 {
                     // Bad connection state. It's already set the response status code.
                     return;
@@ -102,7 +106,7 @@ namespace Microsoft.AspNetCore.Sockets
                     return;
                 }
 
-                if (!await EnsureConnectionStateAsync(state, context, LongPollingTransport.Name))
+                if (!await EnsureConnectionStateAsync(state, context, TransportType.LongPolling, supportedTransports))
                 {
                     // Bad connection state. It's already set the response status code.
                     return;
@@ -155,7 +159,7 @@ namespace Microsoft.AspNetCore.Sockets
                     {
                         _logger.LogDebug("Establishing new connection: {connectionId} on {requestId}", state.Connection.ConnectionId, state.RequestId);
 
-                        state.Connection.Metadata["transport"] = LongPollingTransport.Name;
+                        state.Connection.Metadata["transport"] = "longpolling";
 
                         state.ApplicationTask = ExecuteApplication(endpoint, state.Connection);
                     }
@@ -294,7 +298,7 @@ namespace Microsoft.AspNetCore.Sockets
             await endpoint.OnConnectedAsync(connection);
         }
 
-        private Task ProcessNegotiate(HttpContext context)
+        private Task ProcessNegotiate<TEndPoint>(HttpContext context, EndPointOptions<TEndPoint> options) where TEndPoint : EndPoint
         {
             // Establish the connection
             var state = CreateConnection(context);
@@ -345,11 +349,22 @@ namespace Microsoft.AspNetCore.Sockets
             }
         }
 
-        private async Task<bool> EnsureConnectionStateAsync(ConnectionState connectionState, HttpContext context, string transportName)
+        private async Task<bool> EnsureConnectionStateAsync(ConnectionState connectionState, HttpContext context, TransportType transportType, TransportType supportedTransports)
         {
+            var transportName = transportType.ToString().ToLower();
+
+            if ((supportedTransports & transportType) == 0)
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                // REVIEW: Is this information leakage? Should we only show this in "development"?
+                await context.Response.WriteAsync($"{transportName} transport not supported by this end point type");
+                return false;
+            }
+
             connectionState.Connection.User = context.User;
 
             var transport = connectionState.Connection.Metadata.Get<string>("transport");
+
             if (string.IsNullOrEmpty(transport))
             {
                 connectionState.Connection.Metadata["transport"] = transportName;

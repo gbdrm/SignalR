@@ -17,7 +17,6 @@ namespace Microsoft.AspNetCore.Sockets.Transports
         // REVIEW: This size?
         internal const int MaxBufferSize = 4096;
 
-        public static readonly string Name = "longPolling";
         private readonly ReadableChannel<Message> _application;
         private readonly ILogger _logger;
 
